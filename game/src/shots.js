@@ -25,7 +25,7 @@ function autopilot(plane, missions) {
     while (diff < -Math.PI) diff += Math.PI * 2;
     steer = Math.max(-1, Math.min(1, diff * 2.2));
   }
-  const targetAlt = 950;
+  const targetAlt = 1200;
   if (plane.alt < targetAlt - 60) pitch = 1;
   else if (plane.alt > targetAlt + 60) pitch = -1;
   if (plane.throttle < 0.72) throttleDelta = 0.9 * SAMPLE;

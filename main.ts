@@ -17,6 +17,9 @@ import { buildDossier } from './vendor/makefun-game.ts';
 const here = fileURLToPath(new URL('.', import.meta.url));
 const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
+// Meridian Rings hands in exactly what a player opens: the static game/
+// folder and the three screenshots beside it. Nothing is built or generated
+// on the way — the dossier is a summary of the files as they stand.
 mkdirSync(out, { recursive: true });
 cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });
 mkdirSync(join(out, 'screenshots'), { recursive: true });

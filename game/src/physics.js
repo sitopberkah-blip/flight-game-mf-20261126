@@ -79,6 +79,7 @@ export function stepFlight(plane, input, dt, terrain) {
   if (plane.alt <= 0) {
     const ground = terrain.heightAt(plane.x, plane.y);
     const overRunway = onRunway(plane.x, plane.y);
+    const sea = terrain.isSea(plane.x, plane.y);
     if (plane.airborne || plane.speed >= PLANE.minFlySpeed) {
       if (overRunway && ground <= 2) {
         if (plane.speed <= RUNWAY.maxTouchSpeed && plane.vspeed >= -RUNWAY.maxSink) {
@@ -89,12 +90,12 @@ export function stepFlight(plane, input, dt, terrain) {
         }
         return crash(plane, plane.speed > RUNWAY.maxTouchSpeed ? 'Too fast for the runway — the landing gear folded.' : 'You slammed into the runway. Ease the descent next time.');
       }
-      if (ground > 2) return crash(plane, 'You flew into the hillside.');
-      return crash(plane, 'You ditched in the sea.');
+      if (sea) return crash(plane, 'You ditched in the sea.');
+      return crash(plane, 'You came down in the rough — only the runway is safe to land on.');
     }
     // Rolling on the ground: only the runway is smooth enough to keep going.
     if (!overRunway && plane.speed > 8) {
-      return crash(plane, ground > 2 ? 'You ran off the runway into rough ground.' : 'You taxied off the runway into the sea.');
+      return crash(plane, sea ? 'You taxied off the runway into the sea.' : 'You ran off the runway into rough ground.');
     }
     plane.alt = 0;
     plane.vspeed = 0;

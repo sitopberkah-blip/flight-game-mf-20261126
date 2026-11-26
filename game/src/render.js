@@ -105,9 +105,14 @@ function drawClouds(ctx, plane, terrain, dt) {
     ctx.save();
     ctx.globalAlpha = 0.55 * cloud.shade;
     ctx.fillStyle = '#ffffff';
+    // Three separate puffs, each its own fill, so the cloud has no seams.
     ctx.beginPath();
     ctx.ellipse(cx, cy, r, r * 0.42, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
     ctx.ellipse(cx - r * 0.55, cy + r * 0.08, r * 0.6, r * 0.3, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
     ctx.ellipse(cx + r * 0.55, cy + r * 0.06, r * 0.65, r * 0.32, 0, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
@@ -141,10 +146,17 @@ function drawTargetArrow(ctx, plane, missions) {
   ctx.closePath();
   ctx.fill();
   ctx.restore();
+  // The distance label sits beside the arrow, never over the mission line.
   ctx.fillStyle = COLOURS.hudText;
   ctx.font = '700 12px system-ui, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText(target.kind === 'runway' ? 'RUNWAY ' + dist + ' ft' : 'RING ' + dist + ' ft', ax, ay + 26);
+  const label = target.kind === 'runway' ? 'RUNWAY ' + dist + ' ft' : 'RING ' + dist + ' ft';
+  if (ax > w * 0.6) {
+    ctx.textAlign = 'right';
+    ctx.fillText(label, ax - 26, ay + 4);
+  } else {
+    ctx.textAlign = 'left';
+    ctx.fillText(label, ax + 26, ay + 4);
+  }
 }
 
 function drawVignette(ctx, w, h) {
@@ -211,7 +223,7 @@ function drawTitle(ctx, w, h) {
   ctx.roundRect(px, py, pw, ph, 12);
   ctx.fill();
   ctx.fillStyle = 'rgba(234, 246, 255, 0.92)';
-  ctx.font = '400 15px system-ui, sans-serif';
+  ctx.font = (w < 700 ? '400 13px' : '400 15px') + ' system-ui, sans-serif';
   lines.forEach((line, i) => {
     ctx.fillText(line, w / 2, py + 32 + i * 30);
   });
@@ -270,7 +282,9 @@ export function render(ctx, state, time, dt) {
   drawVignette(ctx, w, h);
 
   if (screen === SCREENS.PLAY || screen === SCREENS.PAUSED) {
-    drawHud(ctx, w, h, plane, missions, time);
+    // The HUD clock is the mission clock, so flash messages expire on the
+    // same clock they were set on (including in staged screenshot scenes).
+    drawHud(ctx, w, h, plane, missions, missions.elapsed);
   }
   if (screen === SCREENS.TITLE) drawTitle(ctx, w, h);
   if (screen === SCREENS.PAUSED) {

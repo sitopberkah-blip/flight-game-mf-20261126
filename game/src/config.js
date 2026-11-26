@@ -16,7 +16,7 @@ export const PLANE = {
   minFlySpeed: 58, // below this the wing stops flying and the plane sinks
   accel: 26, // knots per second toward the throttle target
   turnRate: 0.62, // radians per second at full bank, scaled by speed
-  climbRate: 42, // feet per second at full climb and cruise speed
+  climbRate: 55, // feet per second at full climb and cruise speed
   sinkRate: 55, // feet per second at full dive
   fuelCapacity: 100,
   fuelBurn: 2.4, // fuel units per second at full throttle
@@ -76,7 +76,7 @@ export const RUNWAY = {
   y: 4450,
   heading: 0, // radians; the strip runs along +y (south) from its centre
   length: 700,
-  width: 70,
+  width: 110,
   // A landing counts when you touch down inside the strip, slow and gentle.
   maxTouchSpeed: 105,
   maxSink: 9, // feet per second of descent at touchdown
@@ -92,7 +92,7 @@ export const COLOURS = {
   grass: '#7cb35a',
   field: '#a8c46a',
   forest: '#4d8a44',
-  hill: '#8a7a5a',
+  hill: '#7d9155',
   rock: '#6e6252',
   runway: '#3c3f46',
   runwayMark: '#f2f2e8',

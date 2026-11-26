@@ -8,14 +8,15 @@ import { makeFbm, makeRng } from './random.js';
 const MAP_PIXELS = 1400; // the pre-rendered island is this many pixels square
 const SCALE = MAP_PIXELS / WORLD.size; // world units per map pixel
 
-// Flatten the ground around the runway so landings are possible there.
+// Flatten the ground on the runway strip itself, ramping back up smoothly
+// over 160 world units outside it, so landings are possible there.
 function runwayFlatten(x, y) {
-  const dx = Math.abs(x - RUNWAY.x);
-  const dy = Math.abs(y - RUNWAY.y);
-  const margin = 130;
-  if (dx > RUNWAY.width / 2 + margin || dy > RUNWAY.length / 2 + margin) return 1;
-  const edge = Math.max(dx / (RUNWAY.width / 2 + margin), dy / (RUNWAY.length / 2 + margin));
-  return edge * edge * (3 - 2 * edge); // smoothstep 0 at the strip, 1 outside
+  const dx = Math.max(0, Math.abs(x - RUNWAY.x) - RUNWAY.width / 2);
+  const dy = Math.max(0, Math.abs(y - RUNWAY.y) - RUNWAY.length / 2);
+  const d = Math.hypot(dx, dy);
+  if (d >= 260) return 1;
+  const t = d / 260;
+  return t * t * (3 - 2 * t);
 }
 
 export function createTerrain(seed = 20261126) {
@@ -35,7 +36,34 @@ export function createTerrain(seed = 20261126) {
     // A ridge of hills across the middle of the island.
     const ridge = Math.exp(-Math.pow((y - 2900) / 420, 2)) * Math.exp(-Math.pow((x - 3300) / 900, 2));
     height += ridge * 260 * (0.5 + bumps);
-    return Math.max(0, height * runwayFlatten(x, y));
+    // A flat southern plain for the airfield, and a valley up the middle so
+    // the takeoff path climbs gently instead of into a hillside.
+    const south = smoothstep(3600, 4700, y);
+    height *= 1 - 0.85 * south;
+    const valleyShape = smoothstep(1400, 2000, y) * (1 - smoothstep(4300, 4800, y));
+    const valley = Math.exp(-Math.pow((x - 3000) / 380, 2)) * valleyShape;
+    height *= 1 - 0.8 * valley;
+    // The runway strip itself stays at sea level (height 0) so the plane can
+    // roll and land on it, but the apron around it never drops to sea level:
+    // flattened land that read as water painted a blue halo around the strip.
+    // The floor ramps with the flatten factor, so there is no wall of earth
+    // at the strip's edge for a low-flying plane to clip.
+    const flat = runwayFlatten(x, y);
+    let ground = height * flat;
+    if (dist < 0.98 && flat > 0) ground = Math.max(ground, 10 * flat);
+    return Math.max(0, ground);
+  }
+
+  /** True when a world point is open sea (outside the island). */
+  function isSea(x, y) {
+    const dx = x - WORLD.islandCentreX;
+    const dy = y - WORLD.islandCentreY;
+    return Math.hypot(dx, dy) >= WORLD.islandRadius;
+  }
+
+  function smoothstep(a, b, v) {
+    const t = Math.max(0, Math.min(1, (v - a) / (b - a)));
+    return t * t * (3 - 2 * t);
   }
 
   function colourAt(x, y, height) {
@@ -109,7 +137,7 @@ export function createTerrain(seed = 20261126) {
     });
   }
 
-  return { map, heightAt, clouds, scale: SCALE };
+  return { map, heightAt, isSea, clouds, scale: SCALE };
 }
 
 function drawRunway(ctx) {

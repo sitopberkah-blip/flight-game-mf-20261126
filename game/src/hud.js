@@ -80,7 +80,8 @@ export function drawHud(ctx, w, h, plane, missions, now) {
   }
 
   // --- Bottom centre: compass strip ----------------------------------------
-  const compassW = 340;
+  const narrow = w < 700;
+  const compassW = narrow ? Math.min(340, w - 28) : 340;
   const cx = w / 2;
   panel(ctx, cx - compassW / 2, h - 52, compassW, 38);
   ctx.save();
@@ -91,9 +92,11 @@ export function drawHud(ctx, w, h, plane, missions, now) {
   ctx.fillStyle = COLOURS.hudText;
   ctx.font = '700 13px system-ui, sans-serif';
   ctx.textAlign = 'center';
-  for (let d = -180; d <= 180; d += 15) {
-    const tickDeg = (deg + d + 360) % 360;
-    const x = cx + (d / 180) * (compassW / 2 - 8);
+  // Ticks sit on the absolute degree grid, so the cardinal labels always
+  // land on a tick whatever the heading is.
+  for (let tickDeg = 0; tickDeg < 360; tickDeg += 15) {
+    let offset = (tickDeg - deg + 540) % 360 - 180;
+    const x = cx + (offset / 180) * (compassW / 2 - 8);
     const major = tickDeg % 45 === 0;
     ctx.strokeStyle = 'rgba(234,246,255,0.5)';
     ctx.beginPath();
@@ -102,7 +105,7 @@ export function drawHud(ctx, w, h, plane, missions, now) {
     ctx.stroke();
     if (major) {
       const names = { 0: 'N', 45: 'NE', 90: 'E', 135: 'SE', 180: 'S', 225: 'SW', 270: 'W', 315: 'NW' };
-      ctx.fillText(names[tickDeg] || String(tickDeg), x, h - 18);
+      ctx.fillText(names[tickDeg], x, h - 18);
     }
   }
   ctx.restore();
@@ -115,13 +118,16 @@ export function drawHud(ctx, w, h, plane, missions, now) {
   ctx.closePath();
   ctx.fill();
 
-  // --- Bottom left: throttle ------------------------------------------------
-  panel(ctx, 14, h - 52, 168, 38);
-  label(ctx, 26, h - 34, 'THROTTLE');
+  // --- Throttle: bottom left on wide screens, under the alt panel on narrow
+  // ones so it never collides with the compass strip.
+  const thrX = 14;
+  const thrY = narrow ? 114 : h - 52;
+  panel(ctx, thrX, thrY, 168, 38);
+  label(ctx, thrX + 12, thrY + 18, 'THROTTLE');
   ctx.fillStyle = 'rgba(255,255,255,0.15)';
-  ctx.fillRect(96, h - 42, 72, 9);
+  ctx.fillRect(thrX + 82, thrY + 10, 72, 9);
   ctx.fillStyle = '#7ec3e8';
-  ctx.fillRect(96, h - 42, 72 * plane.throttle, 9);
+  ctx.fillRect(thrX + 82, thrY + 10, 72 * plane.throttle, 9);
 
   // --- Mission line under the top bar --------------------------------------
   const mission = currentMission(missions);
@@ -136,19 +142,28 @@ export function drawHud(ctx, w, h, plane, missions, now) {
       : isFinalApproach(missions)
         ? `Mission ${missions.index + 1}: ${mission.name} — land on runway 07`
         : `Mission ${missions.index + 1}: ${mission.name}`;
-    ctx.fillText(left, w / 2, 128);
+    ctx.fillText(left, w / 2, narrow ? 168 : 128);
   }
 
   // --- Centre flash message --------------------------------------------------
   if (missions.message && now < missions.messageUntil) {
     ctx.font = '700 16px system-ui, sans-serif';
-    const width = ctx.measureText(missions.message).width + 36;
+    // Long messages are shortened with an ellipsis so the panel never runs
+    // off a narrow screen.
+    let text = missions.message;
+    const maxText = w - 96;
+    if (ctx.measureText(text).width > maxText) {
+      while (text.length > 8 && ctx.measureText(text + '…').width > maxText) text = text.slice(0, -1);
+      text += '…';
+    }
+    const width = Math.min(ctx.measureText(text).width + 36, w - 24);
+    ctx.fillStyle = COLOURS.hudPanel;
     ctx.beginPath();
     ctx.roundRect(w / 2 - width / 2, h - 120, width, 34, 8);
     ctx.fill();
     ctx.fillStyle = COLOURS.hudText;
     ctx.textAlign = 'center';
-    ctx.fillText(missions.message, w / 2, h - 97);
+    ctx.fillText(text, w / 2, h - 97);
   }
 
   // --- Low-fuel warning ------------------------------------------------------
@@ -156,6 +171,6 @@ export function drawHud(ctx, w, h, plane, missions, now) {
     ctx.fillStyle = Math.sin(now * 6) > 0 ? COLOURS.hudRed : COLOURS.hudAmber;
     ctx.font = '700 15px system-ui, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('LOW FUEL — find a green ring', w / 2, 158);
+    ctx.fillText('LOW FUEL — find a green ring', w / 2, narrow ? 196 : 158);
   }
 }
