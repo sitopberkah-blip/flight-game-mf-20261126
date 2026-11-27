@@ -1,205 +1,199 @@
-// The island of Meridian: a procedural heightmap, a pre-rendered map canvas
-// the renderer draws each frame, and the height query the flight model uses
-// to decide whether the plane is still flying.
+// The island of Meridian as a heightfield the renderer can project and
+// the flight model can crash into. One job: answer "how high is the ground
+// here, what colour is it, and what is built on it" for any world point.
+//
+// World axes: x runs east, y runs south, altitude is up. Heading 0 flies
+// north (toward smaller y). The island sits in the middle of the chart
+// with a wobbled coastline, two peaks with a saddle between them, a
+// patchwork of crop fields on the gentle land, a harbour town, a ridge of
+// wind turbines, a lighthouse point, and Runway 07 flattened into the
+// south shore.
 
-import { WORLD, RUNWAY, COLOURS } from './config.js';
-import { makeFbm, makeRng } from './random.js';
+import { createRng, clamp, lerp } from './random.js';
 
-const MAP_PIXELS = 1400; // the pre-rendered island is this many pixels square
-const SCALE = MAP_PIXELS / WORLD.size; // world units per map pixel
+const CENTRE = 7000;
+const ISLAND_R = 2950;
 
-// Flatten the ground on the runway strip itself, ramping back up smoothly
-// over 160 world units outside it, so landings are possible there.
-function runwayFlatten(x, y) {
-  const dx = Math.max(0, Math.abs(x - RUNWAY.x) - RUNWAY.width / 2);
-  const dy = Math.max(0, Math.abs(y - RUNWAY.y) - RUNWAY.length / 2);
-  const d = Math.hypot(dx, dy);
-  if (d >= 260) return 1;
-  const t = d / 260;
-  return t * t * (3 - 2 * t);
+// Deterministic 2D value noise: a hashed lattice with smooth blending,
+// layered into fbm. No state, so every module samples the same island.
+function hash2(ix, iy) {
+  let h = (ix * 374761393 + iy * 668265263) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+function noise2(x, y) {
+  const ix = Math.floor(x);
+  const iy = Math.floor(y);
+  const fx = x - ix;
+  const fy = y - iy;
+  const sx = fx * fx * (3 - 2 * fx);
+  const sy = fy * fy * (3 - 2 * fy);
+  const a = hash2(ix, iy);
+  const b = hash2(ix + 1, iy);
+  const c = hash2(ix, iy + 1);
+  const d = hash2(ix + 1, iy + 1);
+  return lerp(lerp(a, b, sx), lerp(c, d, sx), sy);
+}
+function fbm(x, y, octaves) {
+  let sum = 0;
+  let amp = 0.5;
+  let freq = 1;
+  for (let i = 0; i < octaves; i += 1) {
+    sum += amp * noise2(x * freq, y * freq);
+    freq *= 2.03;
+    amp *= 0.5;
+  }
+  return sum;
 }
 
-export function createTerrain(seed = 20261126) {
-  const fbm = makeFbm(seed, 4);
-  const fieldNoise = makeFbm(seed + 77, 3);
-  const forestNoise = makeFbm(seed + 131, 3);
+const PEAKS = [
+  { x: 6150, y: 5050, h: 660, sigma: 760 },
+  { x: 8250, y: 6000, h: 575, sigma: 640 },
+];
 
-  /** Terrain height in feet at a world point; 0 is sea level. */
-  function heightAt(x, y) {
-    const dx = x - WORLD.islandCentreX;
-    const dy = y - WORLD.islandCentreY;
-    const dist = Math.hypot(dx, dy) / WORLD.islandRadius;
-    if (dist >= 1) return 0;
-    const coast = Math.pow(1 - dist * dist, 0.7);
-    const bumps = fbm(x / 900 + 3.1, y / 900 + 7.7);
-    let height = coast * (0.25 + 0.75 * bumps) * WORLD.maxHill;
-    // A ridge of hills across the middle of the island.
-    const ridge = Math.exp(-Math.pow((y - 2900) / 420, 2)) * Math.exp(-Math.pow((x - 3300) / 900, 2));
-    height += ridge * 260 * (0.5 + bumps);
-    // A flat southern plain for the airfield, and a valley up the middle so
-    // the takeoff path climbs gently instead of into a hillside.
-    const south = smoothstep(3600, 4700, y);
-    height *= 1 - 0.85 * south;
-    const valleyShape = smoothstep(1400, 2000, y) * (1 - smoothstep(4300, 4800, y));
-    const valley = Math.exp(-Math.pow((x - 3000) / 380, 2)) * valleyShape;
-    height *= 1 - 0.8 * valley;
-    // The runway strip itself stays at sea level (height 0) so the plane can
-    // roll and land on it, but the apron around it never drops to sea level:
-    // flattened land that read as water painted a blue halo around the strip.
-    // The floor ramps with the flatten factor, so there is no wall of earth
-    // at the strip's edge for a low-flying plane to clip.
-    const flat = runwayFlatten(x, y);
-    let ground = height * flat;
-    if (dist < 0.98 && flat > 0) ground = Math.max(ground, 10 * flat);
-    return Math.max(0, ground);
+export const RUNWAY = {
+  x: 7150, // centre of the strip, in the fields above the south shore
+  y: 9750,
+  heading: (70 * Math.PI) / 180, // runway 07: fly heading 070 to land
+  length: 980,
+  width: 46,
+  elevation: 14,
+  name: '07',
+};
+
+const TOWN = { x: 5050, y: 9050, radius: 620, elevation: 20 };
+
+function coastRadius(theta) {
+  return ISLAND_R * (1 + 0.15 * Math.sin(3 * theta + 1.7) + 0.09 * Math.sin(5 * theta + 0.4) + 0.05 * Math.sin(8 * theta + 2.9));
+}
+
+function distToRunway(x, y) {
+  // Distance to the runway rectangle in the strip's own frame.
+  const dx = x - RUNWAY.x;
+  const dy = y - RUNWAY.y;
+  const along = dx * Math.sin(RUNWAY.heading) - dy * Math.cos(RUNWAY.heading);
+  const across = dx * Math.cos(RUNWAY.heading) + dy * Math.sin(RUNWAY.heading);
+  const ex = Math.max(Math.abs(along) - RUNWAY.length / 2, 0);
+  const ey = Math.max(Math.abs(across) - RUNWAY.width / 2, 0);
+  return Math.hypot(ex, ey);
+}
+
+function rawHeight(x, y) {
+  const dx = x - CENTRE;
+  const dy = y - CENTRE;
+  const dist = Math.hypot(dx, dy);
+  const theta = Math.atan2(dy, dx);
+  const edge = coastRadius(theta);
+  const land = clamp((edge - dist) / 420, 0, 1); // 0 at sea, 1 well inland
+  const landSmooth = land * land * (3 - 2 * land);
+  let h = -12 + landSmooth * 34; // sea floor up to the beach shelf
+  h += landSmooth * fbm(x / 900, y / 900, 3) * 120; // rolling hills
+  h += landSmooth * fbm(x / 260, y / 260, 2) * 26; // local roughness
+  for (const p of PEAKS) {
+    const d2 = (x - p.x) ** 2 + (y - p.y) ** 2;
+    h += p.h * Math.exp(-d2 / (2 * p.sigma * p.sigma)) * landSmooth;
   }
+  // Flatten the town bowl and the runway strip into the hills.
+  const dt = Math.hypot(x - TOWN.x, y - TOWN.y);
+  if (dt < TOWN.radius) h = lerp(TOWN.elevation, h, clamp((dt - TOWN.radius * 0.55) / (TOWN.radius * 0.45), 0, 1));
+  const dr = distToRunway(x, y);
+  if (dr < 190) h = lerp(RUNWAY.elevation, h, clamp(dr / 190, 0, 1));
+  return h;
+}
 
-  /** True when a world point is open sea (outside the island). */
-  function isSea(x, y) {
-    const dx = x - WORLD.islandCentreX;
-    const dy = y - WORLD.islandCentreY;
-    return Math.hypot(dx, dy) >= WORLD.islandRadius;
+const FIELD_PALETTE = ['#79a84b', '#8fae4e', '#a9b356', '#6f9e46', '#c2b268', '#7fae57', '#97b95c'];
+const colourCache = new Map();
+
+function groundColour(x, y, h) {
+  const key = `${Math.round(x / 40)},${Math.round(y / 40)}`;
+  const hit = colourCache.get(key);
+  if (hit) return hit;
+  let colour;
+  if (h < 1.5) {
+    colour = h < -6 ? '#1d5f86' : '#2a7ca6'; // deep and shallow sea
+  } else if (h < 5) {
+    colour = '#d9c084'; // sand
+  } else if (h > 600) {
+    colour = '#e8ecf0'; // snow caps
+  } else if (h > 430) {
+    colour = '#8d8578'; // bare rock
+  } else {
+    // Crop patchwork on the gentle land, forest where the noise says so.
+    const cell = hash2(Math.floor(x / 380), Math.floor(y / 380));
+    const forest = fbm(x / 620 + 40, y / 620 + 40, 2);
+    if (h > 200 || forest > 0.58) colour = '#4e7d3a';
+    else colour = FIELD_PALETTE[Math.floor(cell * FIELD_PALETTE.length) % FIELD_PALETTE.length];
+    if (distToRunway(x, y) < 4) colour = '#4a4a4f'; // the strip itself
   }
+  if (colourCache.size > 60000) colourCache.clear();
+  colourCache.set(key, colour);
+  return colour;
+}
 
-  function smoothstep(a, b, v) {
-    const t = Math.max(0, Math.min(1, (v - a) / (b - a)));
-    return t * t * (3 - 2 * t);
-  }
+export function createTerrain(seed) {
+  const rng = createRng(seed);
 
-  function colourAt(x, y, height) {
-    if (height <= 2) return COLOURS.seaDeep;
-    if (height <= 26) return COLOURS.sand;
-    if (height <= 90) return fieldNoise(x / 500, y / 500) > 0.62 ? COLOURS.field : COLOURS.grass;
-    if (height <= 300) return forestNoise(x / 420, y / 420) > 0.55 ? COLOURS.forest : COLOURS.grass;
-    if (height <= 560) return COLOURS.hill;
-    return COLOURS.rock;
-  }
-
-  // Pre-render the whole island once: sea, beaches, fields, forests, hills,
-  // the runway strip and its markings, a lighthouse and a little harbour town.
-  const map = document.createElement('canvas');
-  map.width = MAP_PIXELS;
-  map.height = MAP_PIXELS;
-  const ctx = map.getContext('2d');
-  const image = ctx.createImageData(MAP_PIXELS, MAP_PIXELS);
-  const data = image.data;
-  for (let py = 0; py < MAP_PIXELS; py += 1) {
-    for (let px = 0; px < MAP_PIXELS; px += 1) {
-      const wx = (px + 0.5) / SCALE;
-      const wy = (py + 0.5) / SCALE;
-      const h = heightAt(wx, wy);
-      // Shallow water near the shore.
-      let colour = colourAt(wx, wy, h);
-      if (h <= 2) {
-        const dx = wx - WORLD.islandCentreX;
-        const dy = wy - WORLD.islandCentreY;
-        const dist = Math.hypot(dx, dy) / WORLD.islandRadius;
-        colour = dist > 0.86 ? COLOURS.seaShallow : COLOURS.seaDeep;
-      }
-      const i = (py * MAP_PIXELS + px) * 4;
-      data[i] = parseInt(colour.slice(1, 3), 16);
-      data[i + 1] = parseInt(colour.slice(3, 5), 16);
-      data[i + 2] = parseInt(colour.slice(5, 7), 16);
-      data[i + 3] = 255;
-    }
-  }
-  ctx.putImageData(image, 0, 0);
-
-  // Soft coastline: lighten the sand edge where land meets sea.
-  ctx.strokeStyle = 'rgba(255, 250, 230, 0.55)';
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  const rng = makeRng(seed + 9);
-  for (let a = 0; a < Math.PI * 2; a += 0.05) {
-    const r = WORLD.islandRadius * (0.97 + (fbm(Math.cos(a) * 2 + 5, Math.sin(a) * 2 + 5) - 0.5) * 0.1);
-    const px = (WORLD.islandCentreX + Math.cos(a) * r) * SCALE;
-    const py = (WORLD.islandCentreY + Math.sin(a) * r) * SCALE;
-    if (a === 0) ctx.moveTo(px, py);
-    else ctx.lineTo(px, py);
-  }
-  ctx.closePath();
-  ctx.stroke();
-
-  drawRunway(ctx);
-  drawTown(ctx, rng);
-
-  // Clouds drift above the map; each has a world position and a parallax
-  // factor below 1, so they slide slower than the ground.
-  const clouds = [];
-  const cloudRng = makeRng(seed + 41);
-  for (let i = 0; i < 26; i += 1) {
-    clouds.push({
-      x: cloudRng() * WORLD.size,
-      y: cloudRng() * WORLD.size,
-      r: 90 + cloudRng() * 170,
-      speed: 6 + cloudRng() * 10,
-      shade: 0.82 + cloudRng() * 0.18,
+  // Harbour town: rows of flat-roofed blocks around the bay.
+  const buildings = [];
+  for (let i = 0; i < 46; i += 1) {
+    const a = rng.range(0, Math.PI * 2);
+    const r = Math.sqrt(rng.next()) * TOWN.radius * 0.8;
+    const x = TOWN.x + Math.cos(a) * r;
+    const y = TOWN.y + Math.sin(a) * r;
+    if (distToRunway(x, y) < 130) continue;
+    buildings.push({
+      x, y,
+      w: rng.range(34, 74), d: rng.range(34, 74),
+      h: rng.range(16, 64),
+      colour: ['#cbb79a', '#b8a58c', '#d6c6a8', '#a89a86', '#c4b294'][rng.int(0, 4)],
+      roof: ['#8a5a44', '#74584a', '#96604a'][rng.int(0, 2)],
     });
   }
 
-  return { map, heightAt, isSea, clouds, scale: SCALE };
-}
-
-function drawRunway(ctx) {
-  const s = MAP_PIXELS / WORLD.size;
-  const cx = RUNWAY.x * s;
-  const cy = RUNWAY.y * s;
-  const w = RUNWAY.width * s;
-  const len = RUNWAY.length * s;
-  ctx.save();
-  ctx.translate(cx, cy);
-  ctx.fillStyle = COLOURS.runway;
-  ctx.fillRect(-w / 2, -len / 2, w, len);
-  ctx.fillStyle = COLOURS.runwayMark;
-  // Centre dashed line.
-  for (let y = -len / 2 + 8; y < len / 2 - 8; y += 22) {
-    ctx.fillRect(-1.5, y, 3, 12);
+  // Wind turbines along the north ridge: tall masts with three blades.
+  const turbines = [];
+  for (let i = 0; i < 6; i += 1) {
+    const x = 5200 + i * 330;
+    const y = 4480 + Math.sin(i * 1.3) * 120;
+    turbines.push({ x, y, mast: 78, rotor: 30, phase: rng.range(0, Math.PI * 2) });
   }
-  // Threshold bars at both ends.
-  ctx.fillRect(-w / 2 + 3, -len / 2 + 6, w - 6, 4);
-  ctx.fillRect(-w / 2 + 3, len / 2 - 10, w - 6, 4);
-  // The big "07" painted at the north end.
-  ctx.font = `bold ${Math.round(w * 0.55)}px sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('07', 0, -len / 2 + 42);
-  ctx.restore();
-}
 
-function drawTown(ctx, rng) {
-  const s = MAP_PIXELS / WORLD.size;
-  // Harbour town on the west bay: a cluster of small roofs and a lighthouse.
-  const tx = 1560 * s;
-  const ty = 2980 * s;
-  ctx.fillStyle = '#b8c4cc';
-  ctx.beginPath();
-  ctx.arc(tx, ty, 46 * s, 0, Math.PI * 2);
-  ctx.fill();
-  for (let i = 0; i < 26; i += 1) {
-    const x = tx + (rng() - 0.5) * 78 * s;
-    const y = ty + (rng() - 0.5) * 78 * s;
-    ctx.fillStyle = ['#c96f4a', '#d9a05b', '#8a9ba8', '#b5524f'][i % 4];
-    ctx.fillRect(x, y, 7 * s, 5 * s);
+  // Boats anchored off the harbour and one lighthouse on the west point.
+  const boats = [];
+  for (let i = 0; i < 7; i += 1) {
+    boats.push({
+      x: TOWN.x + rng.range(-1500, 400),
+      y: TOWN.y + rng.range(500, 1500),
+      heading: rng.range(0, Math.PI * 2),
+      size: rng.range(16, 34),
+      colour: ['#d8d3c8', '#b84a3a', '#3a6ea8', '#e0b84a'][rng.int(0, 3)],
+    });
   }
-  // The lighthouse, south of the town on its own rock.
-  const lx = 1380 * s;
-  const ly = 3480 * s;
-  ctx.fillStyle = '#e8e8e8';
-  ctx.fillRect(lx - 3 * s, ly - 14 * s, 6 * s, 14 * s);
-  ctx.fillStyle = '#d23b3b';
-  ctx.fillRect(lx - 3 * s, ly - 14 * s, 6 * s, 4 * s);
-  ctx.fillStyle = '#ffd23e';
-  ctx.beginPath();
-  ctx.arc(lx, ly - 15 * s, 2.5 * s, 0, Math.PI * 2);
-  ctx.fill();
-}
+  const lighthouse = { x: 4280, y: 7960, h: 34 };
 
-/** True when a world point lies inside the runway strip. */
-export function onRunway(x, y) {
-  return Math.abs(x - RUNWAY.x) <= RUNWAY.width / 2 && Math.abs(y - RUNWAY.y) <= RUNWAY.length / 2;
-}
+  // Drifting cloud puffs in two decks.
+  const clouds = [];
+  for (let i = 0; i < 64; i += 1) {
+    clouds.push({
+      x: rng.range(600, 13400),
+      y: rng.range(600, 13400),
+      alt: rng.range(520, 980),
+      r: rng.range(120, 340),
+      drift: rng.range(2, 6),
+      shade: rng.range(0.82, 1),
+    });
+  }
 
-/** Distance from a world point to the runway centre line, for landing hints. */
-export function runwayOffset(x, y) {
-  return Math.hypot(x - RUNWAY.x, y - RUNWAY.y);
+  return {
+    groundHeight: rawHeight,
+    groundColour,
+    runway: RUNWAY,
+    town: TOWN,
+    buildings,
+    turbines,
+    boats,
+    lighthouse,
+    clouds,
+    peaks: PEAKS,
+  };
 }

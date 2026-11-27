@@ -1,130 +1,149 @@
-// The flight model: one step of arcade flying. Throttle sets a target speed,
-// pitch trades speed for altitude, banking turns the plane, and the ground
-// (or the sea, or a hard runway) ends the flight when you meet it badly.
+// The flight model: one fixed step of arcade flying with real discipline
+// in it. Throttle spools, the wing stalls, banking turns the plane at a
+// rate the speed has to pay for, pitch trades speed for height, fuel
+// burns faster the harder you push, and the ground — runway, grass, rock
+// or sea — ends the sortie according to how you meet it.
 //
-// Units: speed in knots, distances in world units, altitude in feet.
-// 1 knot moves about 1.15 world units per second at this chart's scale.
+// Units: metres, m/s, radians. Input is { roll, pitch, throttleDelta,
+// brake } with each axis in [-1, 1]; weather turbulence arrives as
+// { pitch, roll, lift } nudges the storm adds on top of the stick.
 
-import { PLANE, RUNWAY, WORLD } from './config.js';
-import { onRunway } from './terrain.js';
+import { FLIGHT, WORLD } from './config.js';
+import { clamp, wrapAngle } from './random.js';
 
-const KNOT_TO_UNITS = 1.15;
-const GROUND_FRICTION = 0.92; // rolling on the runway bleeds speed fast
+const ROTATE_SPEED = 29; // m/s: pull here and she leaves the ground
+const GROUND_STEER = 0.5; // rad/s of rudder at taxi speed
 
-export function stepFlight(plane, input, dt, terrain) {
-  if (plane.crashed || plane.landed) return 'done';
+function runwayFrame(runway, x, y) {
+  const dx = x - runway.x;
+  const dy = y - runway.y;
+  return {
+    along: dx * Math.sin(runway.heading) - dy * Math.cos(runway.heading),
+    across: dx * Math.cos(runway.heading) + dy * Math.sin(runway.heading),
+  };
+}
 
-  // Throttle: Shift raises it, Ctrl lowers it, the airbrake drags it down.
-  plane.throttle = clamp(plane.throttle + input.throttleDelta(dt), 0, 1);
-  let throttle = plane.throttle;
-  if (input.brake) throttle = Math.max(0, throttle - 0.5);
+export function overRunway(runway, x, y, margin = 0) {
+  const f = runwayFrame(runway, x, y);
+  return Math.abs(f.along) <= runway.length / 2 + margin && Math.abs(f.across) <= runway.width / 2 + margin;
+}
 
-  // Airspeed chases the throttle's target, faster on the ground roll.
-  const targetSpeed = throttle * PLANE.maxSpeed;
-  const accel = plane.airborne ? PLANE.accel : PLANE.accel * 1.6;
-  plane.speed += clamp(targetSpeed - plane.speed, -accel * dt, accel * dt);
-  if (input.brake && !plane.airborne) plane.speed *= Math.pow(GROUND_FRICTION, dt * 60);
+export function stepFlight(plane, input, dt, terrain, turb = { pitch: 0, roll: 0, lift: 0 }) {
+  const runway = terrain.runway;
+  const groundH = Math.max(terrain.groundHeight(plane.x, plane.y), 0);
+  const onStrip = overRunway(runway, plane.x, plane.y);
+  const floorH = onStrip ? runway.elevation : groundH;
 
-  // Banking turns: the turn rate is best at cruise speed and weak when slow.
-  const speedFactor = clamp(plane.speed / PLANE.cruiseSpeed, 0.25, 1.1);
-  const turn = input.steer * PLANE.turnRate * speedFactor;
-  plane.heading += turn * dt;
-  plane.bank += (clamp(input.steer, -1, 1) - plane.bank) * Math.min(1, dt * 6);
+  // Throttle and propeller.
+  plane.throttle = clamp(plane.throttle + input.throttleDelta * FLIGHT.spoolRate * dt, 0, 1);
+  if (plane.fuel <= 0) plane.throttle = 0; // a dry tank is a glider
+  plane.propPhase += (1.5 + plane.throttle * 26 + plane.speed * 0.25) * dt * Math.PI;
 
-  // Pitch: climb trades speed for height, a dive trades height for speed.
-  const pitch = input.pitch;
-  const flying = plane.airborne || plane.speed >= PLANE.minFlySpeed;
-  if (flying) {
-    plane.vspeed = pitch * PLANE.climbRate * speedFactor;
-    if (pitch > 0) plane.speed -= pitch * 9 * dt; // climbing costs speed
-    if (pitch < 0) plane.speed += -pitch * 7 * dt; // diving gains it
+  // Attitude: the stick commands bank and pitch, the airframe follows.
+  const targetBank = input.roll * FLIGHT.maxBank + turb.roll;
+  plane.bank += clamp(targetBank - plane.bank, -2.4 * dt, 2.4 * dt);
+  let targetPitch = input.pitch * FLIGHT.maxPitch + turb.pitch;
+  if (!plane.airborne) targetPitch = plane.speed > ROTATE_SPEED ? targetPitch : Math.min(0, targetPitch);
+  plane.pitch += clamp(targetPitch - plane.pitch, -1.9 * dt, 1.9 * dt);
+
+  // Speed: thrust against drag, with pitch trading height for knots.
+  const thrust = plane.throttle * FLIGHT.accel;
+  const drag = FLIGHT.drag * plane.speed * plane.speed + (input.brake ? 2.6 : 0);
+  let accel = thrust - drag - (plane.airborne ? Math.sin(plane.pitch) * 6.4 : 0);
+  if (!plane.airborne && !onStrip) accel -= plane.speed * 0.22; // grass drags
+  plane.speed = Math.max(0, plane.speed + accel * dt);
+
+  // Heading: a coordinated turn in the air, the rudder on the ground.
+  if (plane.airborne) {
+    const turn = (9.8 * Math.tan(clamp(plane.bank, -1.2, 1.2))) / Math.max(plane.speed, 20);
+    plane.heading = wrapAngle(plane.heading + clamp(turn, -FLIGHT.turnRate, FLIGHT.turnRate) * dt);
   } else {
-    plane.vspeed = 0;
+    plane.heading = wrapAngle(plane.heading + input.roll * GROUND_STEER * clamp(plane.speed / 18, 0, 1) * dt);
   }
 
-  // Stall: below flying speed with no ground under you, you sink.
-  if (plane.airborne && plane.speed < PLANE.minFlySpeed) {
-    plane.vspeed -= (PLANE.minFlySpeed - plane.speed) * 0.55;
+  // Vertical: lift grows with speed; below the stall the nose drops away.
+  const lift = clamp(plane.speed / FLIGHT.cruiseSpeed, 0, 1.2);
+  plane.stalled = plane.airborne && plane.speed < FLIGHT.minSpeed;
+  let vspeed = Math.sin(plane.pitch) * plane.speed * 0.82 * Math.min(lift, 1)
+    + (plane.throttle - 0.42) * 3.4 * lift
+    + turb.lift;
+  if (plane.stalled) vspeed -= (FLIGHT.minSpeed - plane.speed) * 0.42 + 2.4;
+  if (plane.alt > WORLD.ceiling) vspeed -= (plane.alt - WORLD.ceiling) * 0.01;
+  plane.vspeed = plane.airborne ? vspeed : 0;
+
+  // Travel.
+  const forward = plane.speed * Math.cos(plane.pitch * 0.55);
+  plane.x = clamp(plane.x + Math.sin(plane.heading) * forward * dt, 240, WORLD.size - 240);
+  plane.y = clamp(plane.y - Math.cos(plane.heading) * forward * dt, 240, WORLD.size - 240);
+  if (plane.airborne) plane.alt += plane.vspeed * dt;
+
+  // Fuel and smoke.
+  if (plane.speed > 3 || plane.throttle > 0.05) {
+    plane.fuel = Math.max(0, plane.fuel - FLIGHT.fuelBurn * (0.3 + 0.85 * plane.throttle) * dt);
   }
+  plane.smoke = plane.hull < 45 ? clamp(1 - plane.hull / 45, 0, 1) : 0;
 
-  // Fuel burns with the throttle; empty tanks mean a silent glide.
-  const burn = PLANE.fuelIdle + (PLANE.fuelBurn - PLANE.fuelIdle) * throttle;
-  plane.fuel = Math.max(0, plane.fuel - burn * dt);
-  if (plane.fuel <= 0 && plane.throttle > 0) {
-    plane.throttle = 0;
-  }
-
-  // Move.
-  const step = plane.speed * KNOT_TO_UNITS * dt;
-  plane.x += Math.cos(plane.heading) * step;
-  plane.y += Math.sin(plane.heading) * step;
-  plane.alt = Math.max(0, plane.alt + plane.vspeed * dt);
-  plane.propAngle += (2 + plane.throttle * 26) * dt;
-
-  // Leaving the chart is leaving the sortie: turn the pilot back gently.
-  if (plane.x < 60 || plane.x > WORLD.size - 60 || plane.y < 60 || plane.y > WORLD.size - 60) {
-    const cx = WORLD.islandCentreX - plane.x;
-    const cy = WORLD.islandCentreY - plane.y;
-    const home = Math.atan2(cy, cx);
-    plane.heading = turnToward(plane.heading, home, 0.5 * dt);
-  }
-
-  // Takeoff: fast enough on the runway and you are flying.
-  if (!plane.airborne && plane.speed >= PLANE.minFlySpeed) {
-    plane.airborne = true;
-    plane.alt = Math.max(plane.alt, 4);
-  }
-
-  // Ground contact.
-  if (plane.alt <= 0) {
-    const ground = terrain.heightAt(plane.x, plane.y);
-    const overRunway = onRunway(plane.x, plane.y);
-    const sea = terrain.isSea(plane.x, plane.y);
-    if (plane.airborne || plane.speed >= PLANE.minFlySpeed) {
-      if (overRunway && ground <= 2) {
-        if (plane.speed <= RUNWAY.maxTouchSpeed && plane.vspeed >= -RUNWAY.maxSink) {
-          plane.landed = true;
-          plane.alt = 0;
-          plane.vspeed = 0;
-          return 'landed';
-        }
-        return crash(plane, plane.speed > RUNWAY.maxTouchSpeed ? 'Too fast for the runway — the landing gear folded.' : 'You slammed into the runway. Ease the descent next time.');
+  // Leaving the ground.
+  if (!plane.airborne) {
+    plane.alt = floorH + 2;
+    if (plane.speed >= ROTATE_SPEED && plane.pitch > 0.1) {
+      plane.airborne = true;
+      plane.alt += 1;
+      return 'flying';
+    }
+    // Rolling into the sea or a hillside at speed ends the roll.
+    if (plane.speed > 24 && !onStrip) {
+      if (terrain.groundHeight(plane.x, plane.y) < 0) {
+        plane.crashReason = 'You rolled into the sea. The runway was the grey strip — the blue part is water.';
+        return 'crashed';
       }
-      if (sea) return crash(plane, 'You ditched in the sea.');
-      return crash(plane, 'You came down in the rough — only the runway is safe to land on.');
+      plane.hull -= 26 * dt * (plane.speed / 30);
+      if (plane.hull <= 0) {
+        plane.crashReason = 'The rough ground shook her apart. Keep the roll on the strip.';
+        return 'crashed';
+      }
     }
-    // Rolling on the ground: only the runway is smooth enough to keep going.
-    if (!overRunway && plane.speed > 8) {
-      return crash(plane, sea ? 'You taxied off the runway into the sea.' : 'You ran off the runway into rough ground.');
-    }
-    plane.alt = 0;
-    plane.vspeed = 0;
-  } else if (plane.airborne && plane.alt <= terrain.heightAt(plane.x, plane.y)) {
-    return crash(plane, 'You clipped the terrain.');
+    return 'ground';
   }
 
-  // Out of fuel over the sea or hills with no runway under you: a forced landing.
-  if (plane.fuel <= 0 && plane.alt <= 0 && !onRunway(plane.x, plane.y)) {
-    return crash(plane, 'Out of fuel — you put her down in the rough.');
+  // Meeting the ground again.
+  const newGround = Math.max(terrain.groundHeight(plane.x, plane.y), 0);
+  const newStrip = overRunway(runway, plane.x, plane.y);
+  const floor = newStrip ? runway.elevation : newGround;
+  if (plane.alt <= floor + 2) {
+    const frame = runwayFrame(runway, plane.x, plane.y);
+    plane.touchdown = {
+      vspeed: plane.vspeed,
+      speed: plane.speed,
+      offset: frame.across,
+      onRunway: newStrip,
+      surface: newStrip ? 'runway' : (terrain.groundHeight(plane.x, plane.y) < 0 ? 'water' : 'grass'),
+      headingError: Math.abs(wrapAngle(plane.heading - runway.heading)),
+    };
+    if (plane.touchdown.surface === 'water') {
+      plane.crashReason = 'Ditched in the sea. Salt water is not a runway.';
+      return 'crashed';
+    }
+    if (!newStrip && (plane.speed > 42 || plane.vspeed < -3.5)) {
+      plane.crashReason = 'You flew into the ground at speed. Terrain is not a runway — only the strip, or a very gentle arrival on grass, forgives.';
+      return 'crashed';
+    }
+    if (!plane.gearDown) {
+      plane.crashReason = 'Belly landing — the gear was still up. Press G before you descend.';
+      return 'crashed';
+    }
+    if (plane.vspeed < -6.5) {
+      plane.crashReason = 'You arrived too hard: the descent broke the gear. Flare gently, under 6 m/s down.';
+      return 'crashed';
+    }
+    if (newStrip && plane.touchdown.headingError > 0.6) {
+      plane.crashReason = 'You touched down across the strip, not along it. Line up on heading 070.';
+      return 'crashed';
+    }
+    plane.alt = floor + 2;
+    plane.airborne = false;
+    plane.speed = Math.min(plane.speed, 30);
+    return 'landed';
   }
   return 'flying';
-}
-
-function crash(plane, reason) {
-  plane.crashed = true;
-  plane.crashReason = reason;
-  plane.speed = 0;
-  plane.vspeed = 0;
-  return 'crashed';
-}
-
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function turnToward(angle, target, maxStep) {
-  let diff = target - angle;
-  while (diff > Math.PI) diff -= Math.PI * 2;
-  while (diff < -Math.PI) diff += Math.PI * 2;
-  return angle + clamp(diff, -maxStep, maxStep);
 }

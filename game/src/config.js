@@ -1,117 +1,57 @@
-// Meridian Rings — configuration: world size, flight tuning, colours, missions.
-// One place for every number a designer would want to tweak.
+// Meridian Rings v2 — shared tuning for the chase-view flight game.
+// One job: every constant the other modules agree on lives here, so the
+// flight model, the renderer and the HUD never drift apart.
 
-export const WORLD = {
-  size: 6000, // world units; the island is a square sea chart this wide
-  islandCentreX: 3000,
-  islandCentreY: 3000,
-  islandRadius: 2150,
-  seaLevel: 0,
-  maxHill: 880, // feet of terrain height at the tallest peak
-};
-
-export const PLANE = {
-  maxSpeed: 210, // knots at full throttle, level flight
-  cruiseSpeed: 150,
-  minFlySpeed: 58, // below this the wing stops flying and the plane sinks
-  accel: 26, // knots per second toward the throttle target
-  turnRate: 0.62, // radians per second at full bank, scaled by speed
-  climbRate: 55, // feet per second at full climb and cruise speed
-  sinkRate: 55, // feet per second at full dive
-  fuelCapacity: 100,
-  fuelBurn: 2.4, // fuel units per second at full throttle
-  fuelIdle: 0.35, // fuel units per second at idle
-  tankWarning: 25,
-};
-
-export const RINGS = {
-  radius: 90, // world units; the glowing circle you must fly through
-  passAltitudeMax: 1500, // feet: you must be below this to count a ring
-  ringScore: 100,
-  refuelAmount: 45,
-  perfectBonus: 25, // extra points for passing near a ring's centre
-};
-
-// The three sorties, in order. Each lists its rings in world coordinates and
-// the text the pilot sees. The last ring of the last sortie is the runway.
-export const MISSIONS = [
-  {
-    id: 'ring-run',
-    name: 'Ring Run',
-    brief: 'Thread all five harbour rings, then mind your fuel.',
-    rings: [
-      { x: 3000, y: 1750, refuel: false },
-      { x: 3950, y: 2150, refuel: false },
-      { x: 4450, y: 3050, refuel: true },
-      { x: 3900, y: 3950, refuel: false },
-      { x: 2950, y: 4300, refuel: false },
-    ],
-  },
-  {
-    id: 'coast-patrol',
-    name: 'Coast Patrol',
-    brief: 'Sweep the coast: four rings, then a low pass over the lighthouse.',
-    rings: [
-      { x: 2050, y: 3900, refuel: false },
-      { x: 1500, y: 2950, refuel: true },
-      { x: 1750, y: 1900, refuel: false },
-      { x: 2500, y: 1450, refuel: false },
-    ],
-  },
-  {
-    id: 'home-run',
-    name: 'Home Run',
-    brief: 'One last ring over the hills, then bring her home to the runway.',
-    rings: [
-      { x: 3600, y: 2600, refuel: false },
-      { x: 3200, y: 3600, refuel: false },
-    ],
-    landAfter: true,
-  },
-];
-
-export const RUNWAY = {
-  // A flat strip on the south field, pointing north-south.
-  x: 3000,
-  y: 4450,
-  heading: 0, // radians; the strip runs along +y (south) from its centre
-  length: 700,
-  width: 110,
-  // A landing counts when you touch down inside the strip, slow and gentle.
-  maxTouchSpeed: 105,
-  maxSink: 9, // feet per second of descent at touchdown
-};
-
-export const COLOURS = {
-  skyTop: '#7ec3e8',
-  skyMid: '#a8d8f0',
-  skyLow: '#e8f3f8',
-  seaDeep: '#1d6f9e',
-  seaShallow: '#3f9ec4',
-  sand: '#e8d5a0',
-  grass: '#7cb35a',
-  field: '#a8c46a',
-  forest: '#4d8a44',
-  hill: '#7d9155',
-  rock: '#6e6252',
-  runway: '#3c3f46',
-  runwayMark: '#f2f2e8',
-  ring: '#ffd23e',
-  ringRefuel: '#39d98a',
-  ringDone: '#9fb4c4',
-  hudPanel: 'rgba(12, 24, 36, 0.72)',
-  hudText: '#eaf6ff',
-  hudAmber: '#ffb347',
-  hudRed: '#ff5d5d',
-  hudGreen: '#7be495',
-};
+export const STEP = 1 / 120; // fixed flight-model step, seconds
 
 export const SCREENS = {
   TITLE: 'title',
+  BRIEF: 'brief',
   PLAY: 'play',
   PAUSED: 'paused',
-  LANDED: 'landed',
+  COMPLETE: 'complete',
   CRASHED: 'crashed',
+  LANDED: 'landed',
 };
 
-export const STEP = 1 / 60;
+// World and flight units: metres, metres/second, radians. The HUD converts
+// to feet and knots for display, the way a real panel does.
+export const WORLD = {
+  size: 14000, // the island sea chart is a square this wide, metres
+  seaLevel: 0,
+  viewDistance: 4200, // how far the renderer draws terrain, metres
+  ceiling: 2600, // soft altitude ceiling for the flight model
+};
+
+export const FLIGHT = {
+  minSpeed: 24, // below this the wing stalls, m/s
+  cruiseSpeed: 52,
+  maxSpeed: 88,
+  idleThrottle: 0.08,
+  spoolRate: 0.55, // throttle travel per second at full key press
+  accel: 16, // m/s^2 at full throttle before drag
+  drag: 0.0038, // quadratic drag coefficient
+  climbPower: 15, // m/s of climb the pitch can command at cruise
+  turnRate: 0.62, // rad/s at full bank and cruise speed
+  maxBank: 1.05, // radians of bank at full roll input
+  maxPitch: 0.42, // radians of nose up/down the stick can hold
+  fuelCapacity: 100,
+  fuelBurn: 1.15, // units per second at full throttle
+  hullMax: 100,
+};
+
+export const SCORING = {
+  ringCentre: 150, // points for threading a ring dead centre
+  ringEdge: 60, // points for clipping through off-centre
+  comboWindow: 7, // seconds to keep the combo alive
+  comboMax: 5,
+  star: 250,
+  landingPerfect: 500,
+  landingGood: 300,
+  landingRough: 120,
+};
+
+// Display conversions for the panel.
+export const toFeet = (m) => m * 3.28084;
+export const toKnots = (ms) => ms * 1.94384;
+export const toFpm = (ms) => ms * 196.85;
